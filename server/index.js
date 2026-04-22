@@ -27,6 +27,30 @@ try {
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// In-memory parse cache — avoids re-parsing the same file on every request
+// Holds up to MAX_CACHED_SCANS parsed radar objects
+const MAX_CACHED_SCANS = 20;
+const parseCache = new Map(); // filename -> { data, timestamp }
+
+function getCached(filename) {
+  const entry = parseCache.get(filename);
+  if (entry) {
+    entry.timestamp = Date.now(); // refresh LRU
+    return entry.data;
+  }
+  return null;
+}
+
+function setCached(filename, data) {
+  // Evict oldest entry if at capacity
+  if (parseCache.size >= MAX_CACHED_SCANS) {
+    let oldest = null, oldestTime = Infinity;
+    parseCache.forEach((v, k) => { if (v.timestamp < oldestTime) { oldest = k; oldestTime = v.timestamp; } });
+    if (oldest) parseCache.delete(oldest);
+  }
+  parseCache.set(filename, { data, timestamp: Date.now() });
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../client')));
@@ -194,19 +218,53 @@ app.post('/api/nexrad/download', async (req, res) => {
   }
 });
 
-// Parse a cached radar file
+// Parse a cached radar file (with in-memory cache)
 app.get('/api/radar/parse', (req, res) => {
   const { file } = req.query;
   if (!file) return res.status(400).json({ error: 'file required' });
-  const filePath = path.join(DATA_DIR, path.basename(file));
+  const filename = path.basename(file);
+  const filePath = path.join(DATA_DIR, filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
   try {
+    const cached = getCached(filename);
+    if (cached) {
+      console.log('Cache hit: ' + filename);
+      return res.json(cached);
+    }
+    console.log('Parsing: ' + filename);
     const data = parseRadarFile(filePath);
+    setCached(filename, data);
     res.json(data);
   } catch (err) {
     console.error('Parse error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Pre-warm cache for a list of files (called by client to pre-load adjacent scans)
+app.post('/api/radar/prewarm', (req, res) => {
+  const { files } = req.body;
+  if (!files || !Array.isArray(files)) return res.status(400).json({ error: 'files array required' });
+
+  // Parse in background without blocking response
+  res.json({ queued: files.length });
+
+  (async () => {
+    for (const file of files) {
+      const filename = path.basename(file);
+      if (getCached(filename)) continue; // already cached
+      const filePath = path.join(DATA_DIR, filename);
+      if (!fs.existsSync(filePath)) continue;
+      try {
+        console.log('Pre-warming: ' + filename);
+        const data = parseRadarFile(filePath);
+        setCached(filename, data);
+      } catch (e) { console.warn('Prewarm failed for ' + filename + ':', e.message); }
+      // Small yield between files to avoid blocking the event loop
+      await new Promise(r => setTimeout(r, 10));
+    }
+    console.log('Pre-warm complete for ' + files.length + ' files');
+  })();
 });
 
 // Upload a local radar file

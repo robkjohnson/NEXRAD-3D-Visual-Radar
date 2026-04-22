@@ -23,6 +23,12 @@ window.Radar3D = (function () {
   let radarData          = null;
   let radarLat = 0, radarLon = 0;
 
+  // Geometry cache: filename -> { meshes: {idx->Points}, rings: LineSegments }
+  // Keeps built geometry in memory so scan switching is instant
+  const MAX_GEOM_CACHE   = 8;
+  const geometryCache    = new Map();
+  let   activeFilename   = null;
+
   let currentMoment     = 'reflectivity';
   let currentElevations = new Set([0]);
   let showAllElevs      = false;
@@ -399,9 +405,73 @@ window.Radar3D = (function () {
   }
 
   // Async build — yields between elevations so browser stays responsive
-  async function loadRadarData(data, siteLat, siteLon) {
+  async function loadRadarData(data, siteLat, siteLon, filename) {
     if (building) return;
+
+    // If we have cached geometry for this file+moment+settings, swap instantly
+    if (filename && geometryCache.has(filename)) {
+      const cached = geometryCache.get(filename);
+      cached.lastUsed = Date.now();
+
+      // Only use cache if moment and key settings match
+      if (cached.moment === currentMoment &&
+          cached.heightScale === heightScale &&
+          cached.threshold === threshold &&
+          cached.velocityFilter === velocityFilter &&
+          cached.rangeFilterLow === rangeFilterLow &&
+          cached.rangeFilterHigh === rangeFilterHigh) {
+
+        console.log('[Radar3D] Geometry cache hit:', filename);
+
+        // Remove current meshes from scene (but keep in their own cache entry)
+        Object.values(elevationMeshes).forEach(m => threeScene.remove(m));
+        if (ringsMesh) { threeScene.remove(ringsMesh); ringsMesh = null; }
+
+        // Swap in cached meshes
+        elevationMeshes = cached.meshes;
+        ringsMesh       = cached.rings || null;
+        radarData       = data;
+        radarLat        = siteLat || 0;
+        radarLon        = siteLon || 0;
+        activeFilename  = filename;
+        cached.lastUsed = Date.now();
+
+        // Update elevation selection to match new scan's angles
+        const lowestIdx = data.elevations.reduce((best, elev, idx) =>
+          (elev.elevationAngle || 0) < (data.elevations[best].elevationAngle || 0) ? idx : best, 0);
+
+        const prevAngles = [...currentElevations]
+          .map(i => radarData && radarData.elevations[i] ? radarData.elevations[i].elevationAngle : null)
+          .filter(a => a !== null);
+
+        if (prevAngles.length > 0 && !showAllElevs) {
+          const newSet = new Set();
+          prevAngles.forEach(prevAngle => {
+            let bestIdx = -1, bestDiff = Infinity;
+            data.elevations.forEach((elev, idx) => {
+              const diff = Math.abs((elev.elevationAngle || 0) - prevAngle);
+              if (diff < bestDiff) { bestDiff = diff; bestIdx = idx; }
+            });
+            if (bestIdx >= 0 && bestDiff < 0.5) newSet.add(bestIdx);
+          });
+          if (newSet.size > 0) currentElevations = newSet;
+        }
+
+        // Add cached meshes to scene with correct visibility
+        Object.entries(elevationMeshes).forEach(([i, m]) => {
+          m.visible = showAllElevs || currentElevations.has(Number(i));
+          threeScene.add(m);
+        });
+        if (ringsMesh) threeScene.add(ringsMesh);
+
+        const availMoments = new Set();
+        data.elevations.forEach(e => Object.keys(e.data).forEach(k => availMoments.add(k)));
+        return availMoments;
+      }
+    }
+
     radarData = data; radarLat = siteLat || 0; radarLon = siteLon || 0;
+    activeFilename = filename || null;
     clearScene();
 
     if (!data || !data.elevations || !data.elevations.length) return;
@@ -459,7 +529,99 @@ window.Radar3D = (function () {
 
     if (showRings) buildRangeRings();
     console.log('[Radar3D] Done. Points:', getTotalPoints());
+
+    // Save built geometry to cache
+    if (activeFilename) {
+      evictOldestGeometry();
+      geometryCache.set(activeFilename, {
+        meshes:          { ...elevationMeshes },
+        rings:           ringsMesh,
+        moment:          currentMoment,
+        heightScale,
+        threshold,
+        velocityFilter,
+        rangeFilterLow,
+        rangeFilterHigh,
+        lastUsed:        Date.now(),
+      });
+      console.log('[Radar3D] Cached geometry for:', activeFilename, '| Cache size:', geometryCache.size);
+    }
+
     return availMoments;
+  }
+
+  function evictOldestGeometry() {
+    if (geometryCache.size < MAX_GEOM_CACHE) return;
+    let oldest = null, oldestTime = Infinity;
+    geometryCache.forEach((v, k) => {
+      if (k !== activeFilename && v.lastUsed < oldestTime) {
+        oldest = k; oldestTime = v.lastUsed;
+      }
+    });
+    if (oldest) {
+      const entry = geometryCache.get(oldest);
+      // Remove from scene if somehow still there, then dispose GPU resources
+      Object.values(entry.meshes).forEach(m => {
+        threeScene.remove(m);
+        m.geometry.dispose();
+        m.material.dispose();
+      });
+      if (entry.rings) { threeScene.remove(entry.rings); entry.rings.geometry.dispose(); }
+      geometryCache.delete(oldest);
+      console.log('[Radar3D] Evicted geometry cache for:', oldest);
+    }
+  }
+
+  // Pre-build geometry for a list of {data, filename, siteLat, siteLon} objects
+  // Called by app.js after current scan loads to warm adjacent scans
+  async function prebuildScans(scanList) {
+    for (const scan of scanList) {
+      if (building) { await new Promise(r => setTimeout(r, 100)); continue; }
+      if (geometryCache.has(scan.filename)) continue; // already built
+
+      console.log('[Radar3D] Pre-building geometry for:', scan.filename);
+      const prevFilename = activeFilename;
+      const prevData     = radarData;
+      const prevLat      = radarLat;
+      const prevLon      = radarLon;
+
+      // Build in background without changing the active scene
+      activeFilename = scan.filename;
+      radarData = scan.data;
+      radarLat  = scan.siteLat;
+      radarLon  = scan.siteLon;
+
+      const tempMeshes = {};
+      building = true;
+      try {
+        for (let idx = 0; idx < scan.data.elevations.length; idx++) {
+          const mesh = buildElevationMesh(scan.data.elevations[idx], idx);
+          if (mesh) {
+            mesh.visible = false;
+            tempMeshes[idx] = mesh;
+            // DO NOT add to scene — keep off-scene until actually needed
+          }
+          await new Promise(r => setTimeout(r, 0));
+        }
+      } finally { building = false; }
+
+      // Save to cache
+      evictOldestGeometry();
+      geometryCache.set(scan.filename, {
+        meshes: tempMeshes, rings: null,
+        moment: currentMoment, heightScale, threshold,
+        velocityFilter, rangeFilterLow, rangeFilterHigh,
+        lastUsed: Date.now(),
+      });
+
+      // Restore active state
+      activeFilename = prevFilename;
+      radarData      = prevData;
+      radarLat       = prevLat;
+      radarLon       = prevLon;
+
+      console.log('[Radar3D] Pre-built:', scan.filename);
+    }
   }
 
   async function rebuildPointClouds() {
@@ -501,10 +663,11 @@ window.Radar3D = (function () {
     rangeFilterLow  = -999;
     rangeFilterHigh = 9999;
     threshold       = -30;
+    geometryCache.clear(); // settings changed — invalidate all cached geometry
     rebuildPointClouds();
   }
-  function setHeightScale(s) { heightScale = s; rebuildPointClouds(); }
-  function setThreshold(t)   { threshold = t;   rebuildPointClouds(); }
+  function setHeightScale(s) { heightScale = s; geometryCache.clear(); rebuildPointClouds(); }
+  function setThreshold(t)   { threshold = t;   geometryCache.clear(); rebuildPointClouds(); }
 
   function setElevation(idx, exclusive = false) {
     if (exclusive) { currentElevations = new Set([idx]); showAllElevs = false; }
@@ -573,7 +736,7 @@ window.Radar3D = (function () {
   }
 
   return {
-    init, loadRadarData, setMapStyle,
+    init, loadRadarData, setMapStyle, prebuildScans,
     setMoment, setElevation, setShowAllElevations, syncVisibility,
     setPointSize, setOpacity, setHeightScale, setThreshold,
     setVelocityFilter, setRangeFilter,

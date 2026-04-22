@@ -205,6 +205,17 @@
         { icao: 'KGRB', label: 'Green Bay',  date: '2026-04-17', startUTC: '21:30', endUTC: '22:00' },
       ],
     },
+    {
+      id:          'helene-hurricane-2024',
+      title:       'Hurricane Helene Landfall',
+      date:        '27 Sep 2024',
+      type:        'hurricane',
+      description: 'Hurricane Helene made landfall near Perry, Florida as a powerful Category 4 storm with 140 mph winds. Captured by KTLH (Tallahassee) and KTBW (Tampa Bay) as the eye moved inland, producing extreme winds and catastrophic storm surge along the Big Bend coast.',
+      sites: [
+        { icao: 'KTLH', label: 'Tallahassee', date: '2024-09-27', startUTC: '02:30', endUTC: '04:00' },
+        { icao: 'KTBW', label: 'Tampa Bay',   date: '2024-09-27', startUTC: '02:30', endUTC: '04:00' },
+      ],
+    },
     // Add more events here
   ];
 
@@ -215,10 +226,31 @@
     activeSite: null,
     localFiles: [],
     s3Files: [],
-    activeFilter: 'all',  // 'all' or event id
-    siteScans: [],        // ordered list of local files for the active site
-    scanIndex: -1,        // index of active file in siteScans
+    activeFilter: 'all',
+    siteScans: [],
+    scanIndex: -1,
+    parsedDataCache: new Map(), // filename -> parsed radar JSON (client-side cache)
   };
+
+  const MAX_PARSED_CACHE = 12;
+
+  function getCachedParsed(filename) {
+    const entry = state.parsedDataCache.get(filename);
+    if (entry) { entry.ts = Date.now(); return entry.data; }
+    return null;
+  }
+
+  function setCachedParsed(filename, data) {
+    if (state.parsedDataCache.size >= MAX_PARSED_CACHE) {
+      // Evict oldest
+      let oldest = null, oldestTs = Infinity;
+      state.parsedDataCache.forEach((v, k) => {
+        if (v.ts < oldestTs) { oldest = k; oldestTs = v.ts; }
+      });
+      if (oldest) state.parsedDataCache.delete(oldest);
+    }
+    state.parsedDataCache.set(filename, { data, ts: Date.now() });
+  }
 
   const $ = id => document.getElementById(id);
 
@@ -543,9 +575,16 @@
       const newVal = !Radar3D.showAllElevs;
       Radar3D.setShowAllElevations(newVal);
       allBtn.classList.toggle('active', newVal);
-      // Update each angle group item's active state
-      document.querySelectorAll('.elev-item').forEach(el => {
+      document.querySelectorAll('.elev-item, .elev-sub-item').forEach(el => {
         el.classList.toggle('active', newVal);
+      });
+      // Open all submenus when enabling all tilts, close when disabling
+      document.querySelectorAll('.elev-submenu').forEach(sm => {
+        sm.style.display = newVal ? 'flex' : 'none';
+      });
+      document.querySelectorAll('.elev-cuts-chevron').forEach(ch => {
+        ch.textContent = newVal ? '⌄' : '›';
+        ch.classList.toggle('open', newVal);
       });
       updatePointCount();
     });
@@ -564,54 +603,189 @@
     const sortedGroups = Object.entries(angleGroups)
       .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]));
 
-    sortedGroups.forEach(([angleKey, entries]) => {
-      // Collect all unique moments across all cuts at this angle
-      const allMoments = new Set();
-      entries.forEach(({ elev }) => Object.keys(elev.data).forEach(k => allMoments.add(k)));
+    const momentOrder = ['reflectivity','velocity','spectrum','zdr','phi','rho'];
+    const momentShort = { reflectivity:'REF', velocity:'VEL', spectrum:'SW', zdr:'ZDR', phi:'PHI', rho:'RHO' };
 
-      // Map moment keys to short labels in a fixed display order
-      const momentOrder = ['reflectivity','velocity','spectrum','zdr','phi','rho'];
-      const momentShort = { reflectivity:'REF', velocity:'VEL', spectrum:'SW', zdr:'ZDR', phi:'PHI', rho:'RHO' };
-      const momentTags = momentOrder
-        .filter(k => allMoments.has(k))
-        .map(k => `<span class="moment-tag">${momentShort[k]}</span>`)
-        .join('');
+    // Determine a human-readable label for a cut based on its unique moments
+    // compared to other cuts at the same angle
+    function cutLabel(entryMoments, allEntriesAtAngle) {
+      const keys = Object.keys(entryMoments);
+      if (allEntriesAtAngle.length === 1) return null;
 
-      // All internal indices for this angle group (for multi-cut toggling)
-      const indices = entries.map(e => e.idx);
-      const isActive = indices.some(i => Radar3D.currentElevations.has(i)) || Radar3D.showAllElevs;
+      const hasVel     = keys.includes('velocity');
+      const hasRef     = keys.includes('reflectivity');
+      const hasZdr     = keys.includes('zdr');
+      const hasPhi     = keys.includes('phi');
+      const hasRho     = keys.includes('rho');
+      const hasDualPol = hasZdr || hasPhi || hasRho;
 
-      const item = document.createElement('div');
-      item.className = 'elev-item' + (isActive ? ' active' : '');
-      item.innerHTML = `
-        <span class="elev-angle">${angleKey}°</span>
-        <span class="elev-moments">${momentTags}</span>
-        ${entries.length > 1 ? `<span class="elev-cuts">${entries.length} cuts</span>` : ''}
-      `;
+      console.log('[CutLabel] keys:', keys, '| hasRef:', hasRef, '| hasVel:', hasVel, '| hasDualPol:', hasDualPol);
 
-      item.addEventListener('click', () => {
-        // If "all tilts" is on, first populate currentElevations with every
-        // elevation index so we can deselect individual ones cleanly
+      if (hasRef && !hasVel && !hasDualPol) return 'Long Range REF';
+      if (hasRef && !hasVel && hasDualPol)  return 'REF + Dual-Pol';
+      if (hasVel && hasDualPol)              return 'Vel + Dual-Pol';
+      if (hasVel && !hasDualPol && hasRef)   return 'REF + Velocity';
+      if (hasVel && !hasDualPol && !hasRef)  return 'Velocity Only';
+      if (hasDualPol && !hasVel)             return 'Dual-Pol';
+
+      // Fallback: just number the cuts
+      const cutIdx = allEntriesAtAngle.findIndex(
+        e => Object.keys(e.elev.data).sort().join() === keys.sort().join()
+      );
+      return `Cut ${cutIdx + 1}`;
+    }
+
+    function makeToggleHandler(idx, itemEl) {
+      return () => {
         if (Radar3D.showAllElevs) {
           state.radarData.elevations.forEach((_, i) => Radar3D.currentElevations.add(i));
           Radar3D.setShowAllElevations(false);
           allBtn.classList.remove('active');
-          // Mark all angle group items as active to match
-          document.querySelectorAll('.elev-item').forEach(el => el.classList.add('active'));
+          document.querySelectorAll('.elev-item, .elev-sub-item').forEach(el => el.classList.add('active'));
         }
-
-        const nowActive = indices.some(i => Radar3D.currentElevations.has(i));
+        const nowActive = Radar3D.currentElevations.has(idx);
         if (nowActive) {
-          indices.forEach(i => Radar3D.currentElevations.delete(i));
+          Radar3D.currentElevations.delete(idx);
         } else {
-          indices.forEach(i => Radar3D.currentElevations.add(i));
+          Radar3D.currentElevations.add(idx);
         }
         Radar3D.syncVisibility();
-        item.classList.toggle('active', !nowActive);
+        itemEl.classList.toggle('active', !nowActive);
         updatePointCount();
-      });
+      };
+    }
 
-      container.appendChild(item);
+    sortedGroups.forEach(([angleKey, entries]) => {
+      if (entries.length === 1) {
+        // ── Single cut — simple row ──────────────────────────────────────
+        const { elev, idx } = entries[0];
+        const keys = Object.keys(elev.data);
+        const tags = momentOrder.filter(k => keys.includes(k))
+          .map(k => `<span class="moment-tag">${momentShort[k]}</span>`).join('');
+        const isActive = Radar3D.currentElevations.has(idx) || Radar3D.showAllElevs;
+
+        const item = document.createElement('div');
+        item.className = 'elev-item' + (isActive ? ' active' : '');
+        item.innerHTML = `
+          <span class="elev-angle">${angleKey}°</span>
+          <span class="elev-moments">${tags}</span>`;
+        item.addEventListener('click', makeToggleHandler(idx, item));
+        container.appendChild(item);
+
+      } else {
+        // ── Multiple cuts — clickable angle row + collapsible sub-menu ───
+        const firstIdx   = entries[0].idx;
+        const firstKeys  = Object.keys(entries[0].elev.data);
+        const firstTags  = momentOrder.filter(k => firstKeys.includes(k))
+          .map(k => `<span class="moment-tag">${momentShort[k]}</span>`).join('');
+
+        const anyActive  = entries.some(({ idx }) => Radar3D.currentElevations.has(idx)) || Radar3D.showAllElevs;
+        const allIndices = entries.map(e => e.idx);
+
+        // Wrapper so we can show/hide the submenu
+        const wrapper = document.createElement('div');
+        wrapper.className = 'elev-group-wrapper';
+
+        // Main angle row — clicking toggles the whole group on/off
+        const mainRow = document.createElement('div');
+        mainRow.className = 'elev-item elev-item-multicut' + (anyActive ? ' active' : '');
+        mainRow.innerHTML = `
+          <span class="elev-angle">${angleKey}°</span>
+          <span class="elev-moments">${firstTags}</span>
+          <span class="elev-cuts-chevron" title="Show cuts">›</span>`;
+        wrapper.appendChild(mainRow);
+
+        // Submenu — hidden by default
+        const subMenu = document.createElement('div');
+        subMenu.className = 'elev-submenu';
+        subMenu.style.display = 'none';
+
+        entries.forEach(({ elev, idx }, cutI) => {
+          const keys  = Object.keys(elev.data);
+          const tags  = momentOrder.filter(k => keys.includes(k))
+            .map(k => `<span class="moment-tag">${momentShort[k]}</span>`).join('');
+          const label = cutLabel(elev.data, entries) || `Cut ${cutI + 1}`;
+          const isActive = Radar3D.currentElevations.has(idx) || Radar3D.showAllElevs;
+
+          const sub = document.createElement('div');
+          sub.className = 'elev-sub-item' + (isActive ? ' active' : '');
+          sub.innerHTML = `
+            <span class="elev-sub-label">${label}</span>
+            <span class="elev-moments">${tags}</span>`;
+
+          sub.addEventListener('click', e => {
+            e.stopPropagation();
+            if (Radar3D.showAllElevs) {
+              state.radarData.elevations.forEach((_, i) => Radar3D.currentElevations.add(i));
+              Radar3D.setShowAllElevations(false);
+              allBtn.classList.remove('active');
+            }
+            const nowActive = Radar3D.currentElevations.has(idx);
+            if (nowActive) {
+              Radar3D.currentElevations.delete(idx);
+            } else {
+              Radar3D.currentElevations.add(idx);
+            }
+            Radar3D.syncVisibility();
+            sub.classList.toggle('active', !nowActive);
+            // Keep main row active if any cut is still on
+            const stillAny = allIndices.some(i => Radar3D.currentElevations.has(i));
+            mainRow.classList.toggle('active', stillAny);
+            updatePointCount();
+          });
+
+          subMenu.appendChild(sub);
+        });
+
+        wrapper.appendChild(subMenu);
+
+        // Chevron button — toggles submenu open/close
+        const chevron = mainRow.querySelector('.elev-cuts-chevron');
+
+        chevron.addEventListener('click', e => {
+          e.stopPropagation();
+          const open = subMenu.style.display !== 'none';
+          subMenu.style.display = open ? 'none' : 'flex';
+          chevron.textContent   = open ? '›' : '⌄';
+          chevron.classList.toggle('open', !open);
+        });
+
+        // Main row click — toggle all cuts in this group on/off
+        mainRow.addEventListener('click', () => {
+          if (Radar3D.showAllElevs) {
+            state.radarData.elevations.forEach((_, i) => Radar3D.currentElevations.add(i));
+            Radar3D.setShowAllElevations(false);
+            allBtn.classList.remove('active');
+          }
+
+          const anyNowActive = allIndices.some(i => Radar3D.currentElevations.has(i));
+
+          if (anyNowActive) {
+            // Deselect all cuts + close submenu
+            allIndices.forEach(i => Radar3D.currentElevations.delete(i));
+            subMenu.style.display = 'none';
+            chevron.textContent   = '›';
+            chevron.classList.remove('open');
+            subMenu.querySelectorAll('.elev-sub-item').forEach(s => s.classList.remove('active'));
+            mainRow.classList.remove('active');
+          } else {
+            // Select first cut only, open submenu to show options
+            Radar3D.currentElevations.add(firstIdx);
+            subMenu.style.display = 'flex';
+            chevron.textContent   = '⌄';
+            chevron.classList.add('open');
+            subMenu.querySelectorAll('.elev-sub-item').forEach((s, i) => {
+              s.classList.toggle('active', i === 0);
+            });
+            mainRow.classList.add('active');
+          }
+
+          Radar3D.syncVisibility();
+          updatePointCount();
+        });
+
+        container.appendChild(wrapper);
+      }
     });
   }
 
@@ -1093,12 +1267,19 @@
   }
 
   async function loadRadarFile(filename, siteIcao) {
-    setLoading(true, `Parsing ${filename}...`);
+    setLoading(true, `Loading ${filename}...`);
     try {
-      const res = await fetch(`${API}/radar/parse?file=${encodeURIComponent(filename)}`);
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      // Check client-side parse cache first — avoids server round-trip entirely
+      let data = getCachedParsed(filename);
+      if (data) {
+        console.log('[App] Parse cache hit:', filename);
+      } else {
+        const res = await fetch(`${API}/radar/parse?file=${encodeURIComponent(filename)}`);
+        if (!res.ok) throw new Error(`Server error: ${res.status}`);
+        data = await res.json();
+        if (data.error) throw new Error(data.error);
+        setCachedParsed(filename, data);
+      }
 
       state.radarData = data;
       state.activeFile = filename;
@@ -1115,7 +1296,7 @@
       data.elevations.forEach(e => Object.keys(e.data).forEach(k => state.availableMoments.add(k)));
 
       // Load into Cesium renderer with site coordinates
-      Radar3D.loadRadarData(data, coords.lat, coords.lon);
+      Radar3D.loadRadarData(data, coords.lat, coords.lon, filename);
 
       updateMomentButtons();
       buildElevationList();
@@ -1148,6 +1329,9 @@
 
       // Build scan navigation list for this site
       buildScanList(filename, icao);
+
+      // Pre-warm server parse cache + pre-build client geometry for adjacent scans
+      prewarmAdjacentScans(filename, icao);
 
       $('empty-state').classList.add('hidden');
       switchTab('display');
@@ -1248,6 +1432,60 @@
     const file = state.siteScans[newIdx];
     const icao = extractIcaoFromFilename(file.name);
     loadRadarFile(file.name, icao);
+  }
+
+  // Pre-load and pre-build geometry for scans adjacent to the current one
+  // so the user can scrub forward/back without waiting
+  async function prewarmAdjacentScans(currentFilename, siteIcao) {
+    const scans  = state.siteScans;
+    const idx    = state.scanIndex;
+    if (!scans.length || idx < 0) return;
+
+    // Gather up to 2 before and 2 after current position
+    const adjacentIndices = [-2, -1, 1, 2]
+      .map(offset => idx + offset)
+      .filter(i => i >= 0 && i < scans.length);
+
+    if (!adjacentIndices.length) return;
+
+    const adjacentFiles = adjacentIndices.map(i => scans[i].name);
+
+    // 1. Tell server to pre-parse these files into its memory cache (optional, ignore errors)
+    fetch(`${API}/radar/prewarm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: adjacentFiles }),
+    }).catch(() => {}); // fire-and-forget, 404 is fine if server doesn't support it
+
+    // 2. Pre-fetch parsed data and pre-build Three.js geometry on client
+    // Do this quietly in the background — don't block UI
+    const coords = getSiteCoords(siteIcao);
+    const prebuildList = [];
+
+    for (const adjFile of adjacentFiles) {
+      try {
+        // Use cached parsed data if available
+        let data = getCachedParsed(adjFile);
+        if (!data) {
+          const res = await fetch(`${API}/radar/parse?file=${encodeURIComponent(adjFile)}`);
+          if (!res.ok) continue;
+          data = await res.json();
+          if (data.error) continue;
+          setCachedParsed(adjFile, data);
+        }
+        prebuildList.push({
+          filename: adjFile,
+          data,
+          siteLat: coords.lat,
+          siteLon: coords.lon,
+        });
+      } catch (e) { /* silent — prebuild is best-effort */ }
+    }
+
+    if (prebuildList.length) {
+      console.log('[App] Pre-building geometry for', prebuildList.length, 'adjacent scans');
+      Radar3D.prebuildScans(prebuildList);
+    }
   }
 
   function switchTab(name) {

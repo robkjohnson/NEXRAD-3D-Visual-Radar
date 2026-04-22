@@ -204,6 +204,52 @@ input.toggle { width: 32px; height: 16px; accent-color: var(--accent); cursor: p
   padding: 1px 5px; border: 1px solid var(--border);
   border-radius: 8px; letter-spacing: 0.5px;
 }
+/* Multi-cut group wrapper */
+.elev-group-wrapper { display: flex; flex-direction: column; }
+
+/* Main angle row with chevron for multi-cut */
+.elev-item-multicut { cursor: pointer; }
+.elev-cuts-chevron {
+  margin-left: auto;
+  font-size: 14px; color: var(--text-muted);
+  padding: 0 2px; flex-shrink: 0;
+  transition: color 0.15s;
+  cursor: pointer;
+}
+.elev-cuts-chevron:hover { color: var(--accent); }
+.elev-cuts-chevron.open  { color: var(--accent); }
+
+/* Submenu container */
+.elev-submenu {
+  display: flex; flex-direction: column;
+  margin-left: 10px;
+  border-left: 2px solid var(--border);
+  padding: 2px 0;
+}
+
+/* Individual cut sub-row */
+.elev-sub-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px 5px 12px;
+  background: transparent; border: 1px solid transparent;
+  cursor: pointer; transition: all 0.15s;
+  font-family: var(--mono); font-size: 11px;
+  border-radius: 0 3px 3px 0;
+}
+.elev-sub-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.elev-sub-item.active {
+  background: var(--accent-glow);
+  border-color: var(--accent-dim);
+}
+.elev-sub-label {
+  min-width: 90px; font-size: 10px;
+  color: var(--text-muted); letter-spacing: 0.5px;
+}
+.elev-sub-item.active .elev-sub-label { color: var(--accent); }
+
 .elev-all-toggle {
   padding: 5px 10px; margin-bottom: 4px;
   background: var(--bg-surface); border: 1px dashed var(--border-bright);
