@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Cached radar data — these are large binary files downloaded at runtime
+# Users download their own via the app
+data/
+!data/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment / secrets — never commit these
+.env
+.env.local
+config.json
+
+# Build artifacts
+dist/
+build/
+
+# Package lock (optional — include if you want reproducible installs)
+# server/package-lock.json

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NEXRAD 3D — Radar Visualization</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Widgets/widgets.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════ SIDEBAR ═══ -->
+<aside id="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <span class="logo-icon">◈</span>
+      <div>
+        <div class="logo-title">NEXRAD<span class="logo-accent">3D</span></div>
+        <div class="logo-sub">Radar Visualization System</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab active" data-tab="files">FILES</button>
+    <button class="tab" data-tab="display">DISPLAY</button>
+    <button class="tab" data-tab="fetch">FETCH</button>
+  </div>
+
+  <!-- FETCH TAB -->
+  <div class="tab-content" id="tab-fetch">
+
+    <div class="section-label">NOTABLE EVENTS</div>
+    <div id="events-list" class="events-list"></div>
+
+    <div class="fetch-divider"></div>
+
+    <div class="section-label">MANUAL QUERY</div>
+    <div class="form-group">
+      <label>RADAR SITE (ICAO)</label>
+      <div class="input-row">
+        <input type="text" id="site-input" placeholder="e.g. KTLX" maxlength="4" value="KTLX">
+        <button class="icon-btn" id="site-lookup-btn" title="Browse sites">⊕</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>DATE</label>
+      <input type="date" id="date-input" value="">
+    </div>
+    <button class="btn-primary" id="list-btn">
+      <span class="btn-icon">⟳</span> LIST AVAILABLE FILES
+    </button>
+    <div id="file-list-container" style="display:none">
+      <div class="section-label" style="margin-top:16px">AVAILABLE SCANS <span id="file-count" class="badge"></span></div>
+      <div id="s3-file-list" class="file-list"></div>
+    </div>
+  </div>
+
+  <!-- FILES TAB -->
+  <div class="tab-content active" id="tab-files">
+    <div class="section-label">LOCAL / CACHED FILES</div>
+    <div class="files-filter-bar">
+      <button class="filter-chip active" data-filter="all">ALL</button>
+      <div id="event-filter-chips" style="display:contents"></div>
+    </div>
+    <div class="upload-zone" id="upload-zone">
+      <div class="upload-icon">↑</div>
+      <div>Drop radar file here or <span class="link">browse</span></div>
+      <input type="file" id="upload-input" accept="*/*" style="display:none">
+    </div>
+    <div id="local-file-list" class="file-list"></div>
+  </div>
+
+  <!-- DISPLAY TAB -->
+  <div class="tab-content" id="tab-display">
+
+    <div class="section-label">MOMENT</div>
+    <div id="moment-buttons" class="moment-grid"></div>
+
+    <!-- Moment info panel -->
+    <div id="moment-info-panel" class="moment-info-panel">
+      <div class="moment-info-header" id="moment-info-toggle">
+        <span id="moment-info-title">REFLECTIVITY</span>
+        <span class="moment-info-chevron">▾</span>
+      </div>
+      <div class="moment-info-body" id="moment-info-body">
+        <p id="moment-info-desc" class="moment-info-desc"></p>
+
+        <!-- Colorbar with value labels -->
+        <div class="moment-colorbar-wrap">
+          <div class="moment-colorbar-labels top" id="moment-cb-max"></div>
+          <canvas id="moment-cb-canvas" width="100%" height="16"></canvas>
+          <div class="moment-colorbar-labels bottom" id="moment-cb-min"></div>
+          <div id="moment-cb-ticks" class="moment-cb-ticks"></div>
+        </div>
+
+        <!-- Context-aware filter controls -->
+        <div id="moment-filter-controls"></div>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-top:14px">ELEVATION ANGLES</div>
+    <div id="elevation-list" class="elevation-list"></div>
+
+    <div class="section-label" style="margin-top:14px">MAP STYLE</div>
+    <div class="map-style-grid" id="map-style-grid">
+      <button class="map-style-btn active" data-style="satellite">SATELLITE</button>
+      <button class="map-style-btn" data-style="street">STREET</button>
+      <button class="map-style-btn" data-style="terrain">TERRAIN</button>
+      <button class="map-style-btn" data-style="dark">DARK</button>
+    </div>
+
+    <div class="section-label" style="margin-top:14px">RENDER OPTIONS</div>
+    <div class="form-group">
+      <label>POINT SIZE</label>
+      <div class="range-row">
+        <input type="range" id="point-size" min="1" max="20" step="1" value="4">
+        <span id="point-size-val" class="range-val">4</span>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>OPACITY</label>
+      <div class="range-row">
+        <input type="range" id="opacity-range" min="0.1" max="1" step="0.05" value="0.9">
+        <span id="opacity-val" class="range-val">0.9</span>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>HEIGHT SCALE</label>
+      <div class="range-row">
+        <input type="range" id="height-scale" min="0.2" max="5" step="0.1" value="1.0">
+        <span id="height-scale-val" class="range-val">1.0</span>
+      </div>
+    </div>
+    <div class="toggle-row">
+      <label>SHOW RANGE RINGS</label>
+      <input type="checkbox" id="show-rings" checked class="toggle">
+    </div>
+    <div class="toggle-row">
+      <label>SHOW ALL TILTS</label>
+      <input type="checkbox" id="animate-tilts" class="toggle">
+    </div>
+  </div>
+</aside>
+
+<!-- ═══════════════════════════════════════════════ MAIN ══════ -->
+<main id="main">
+  <div id="topbar">
+    <div id="status-left">
+      <span id="radar-id-display" class="radar-id">—</span>
+      <span id="radar-time-display" class="radar-time">NO DATA LOADED</span>
+    </div>
+    <div id="status-center">
+      <div id="loading-bar" class="loading-bar" style="display:none">
+        <div id="loading-fill" class="loading-fill"></div>
+        <span id="loading-text">Loading...</span>
+      </div>
+      <!-- Scan navigation — only shown when a file is loaded -->
+      <div id="scan-nav" class="scan-nav" style="display:none">
+        <button class="scan-nav-btn" id="scan-prev-btn" title="Previous scan" disabled>
+          ‹
+        </button>
+        <div class="scan-nav-info">
+          <div class="scan-nav-label" id="scan-prev-label">—</div>
+          <div class="scan-nav-pos" id="scan-nav-pos">— / —</div>
+          <div class="scan-nav-label" id="scan-next-label">—</div>
+        </div>
+        <button class="scan-nav-btn" id="scan-next-btn" title="Next scan" disabled>
+          ›
+        </button>
+      </div>
+    </div>
+    <div id="status-right">
+      <span id="point-count" class="stat">0 pts</span>
+      <button class="icon-btn" id="reset-camera-btn" title="Reset camera">⊙</button>
+      <button class="icon-btn" id="toggle-sidebar-btn" title="Toggle sidebar">☰</button>
+    </div>
+  </div>
+
+  <div id="cesium-container"></div>
+
+  <!-- Colorbar -->
+  <div id="colorbar-container">
+    <div id="colorbar-title"></div>
+    <canvas id="colorbar-canvas" width="20" height="200"></canvas>
+    <div id="colorbar-labels"></div>
+  </div>
+
+  <!-- Controls hint -->
+  <div id="controls-hint">
+    <span>🖱 Drag: Orbit</span>
+    <span>Right-drag: Zoom</span>
+    <span>Middle-drag: Pan</span>
+    <span>Scroll: Zoom</span>
+  </div>
+
+  <!-- Empty state -->
+  <div id="empty-state">
+    <div class="empty-card">
+      <div class="empty-icon">◈</div>
+      <div class="empty-title">NEXRAD 3D RADAR VIEWER</div>
+      <div class="empty-sub">Select a radar site and date from the FETCH tab,<br>then download and load a scan to begin.</div>
+      <div class="empty-tips">
+        <div class="tip">↖ Use the FILES tab to load cached scans</div>
+        <div class="tip">↖ Use the FETCH tab to download from archive</div>
+        <div class="tip">↖ Use the DISPLAY tab to control rendering</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Site Modal -->
+<div id="site-modal" class="modal" style="display:none">
+  <div class="modal-backdrop"></div>
+  <div class="modal-box">
+    <div class="modal-header">
+      <span>NEXRAD SITES</span>
+      <button class="icon-btn modal-close">✕</button>
+    </div>
+    <input type="text" id="site-search" placeholder="Search by name or state...">
+    <div id="site-grid" class="site-grid"></div>
+  </div>
+</div>
+
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Cesium.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="js/colormaps.js"></script>
+<script src="js/radar3d.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
