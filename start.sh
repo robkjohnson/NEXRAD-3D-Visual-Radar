@@ -53,4 +53,4 @@ echo ""
 
 # Start server
 cd "$SERVER_DIR"
-PORT=$PORT node index.js
+PORT=$PORT node --max-old-space-size=1536 index.js

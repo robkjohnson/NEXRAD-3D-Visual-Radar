@@ -24,8 +24,9 @@ window.Radar3D = (function () {
   let radarLat = 0, radarLon = 0;
 
   // Geometry cache: filename -> { meshes: {idx->Points}, rings: LineSegments }
-  // Keeps built geometry in memory so scan switching is instant
-  const MAX_GEOM_CACHE   = 8;
+  // Keeps built geometry in memory so scan switching is instant.
+  // Small — each entry holds one full scan's worth of GPU geometry.
+  const MAX_GEOM_CACHE   = 6;
   const geometryCache    = new Map();
   let   activeFilename   = null;
 
@@ -38,6 +39,7 @@ window.Radar3D = (function () {
   let threshold         = -30;
   let showRings         = true;
   let building          = false;
+  let _prebuildAborted  = false;
   // Extended filter state
   let velocityFilter    = 0;    // exclude ±N m/s around zero
   let rangeFilterLow    = -999; // keep values >= this
@@ -530,12 +532,13 @@ window.Radar3D = (function () {
     if (showRings) buildRangeRings();
     console.log('[Radar3D] Done. Points:', getTotalPoints());
 
-    // Save built geometry to cache
+    // Save built geometry to cache (parseData stored so callers can skip re-fetch)
     if (activeFilename) {
       evictOldestGeometry();
       geometryCache.set(activeFilename, {
         meshes:          { ...elevationMeshes },
         rings:           ringsMesh,
+        parseData:       data,
         moment:          currentMoment,
         heightScale,
         threshold,
@@ -548,6 +551,22 @@ window.Radar3D = (function () {
     }
 
     return availMoments;
+  }
+
+  // Dispose all pre-built (non-active) geometry and clear the cache.
+  // Call this when switching radar sites so stale GPU buffers are freed immediately.
+  function clearGeometryCache() {
+    geometryCache.forEach((entry, filename) => {
+      if (filename === activeFilename) return; // active meshes are owned by elevationMeshes; clearScene() handles them
+      Object.values(entry.meshes).forEach(m => {
+        threeScene.remove(m);
+        m.geometry.dispose();
+        m.material.dispose();
+      });
+      if (entry.rings) { threeScene.remove(entry.rings); entry.rings.geometry.dispose(); }
+    });
+    geometryCache.clear();
+    console.log('[Radar3D] Geometry cache cleared');
   }
 
   function evictOldestGeometry() {
@@ -572,10 +591,12 @@ window.Radar3D = (function () {
     }
   }
 
-  // Pre-build geometry for a list of {data, filename, siteLat, siteLon} objects
-  // Called by app.js after current scan loads to warm adjacent scans
-  async function prebuildScans(scanList) {
+  // Pre-build geometry for a list of {data, filename, siteLat, siteLon} objects.
+  // onScanBuilt(filename) is called after each scan is cached — use it to refresh UI.
+  async function prebuildScans(scanList, onScanBuilt) {
+    _prebuildAborted = false;
     for (const scan of scanList) {
+      if (_prebuildAborted) { console.log('[Radar3D] Prebuild aborted'); return; }
       if (building) { await new Promise(r => setTimeout(r, 100)); continue; }
       if (geometryCache.has(scan.filename)) continue; // already built
 
@@ -595,6 +616,7 @@ window.Radar3D = (function () {
       building = true;
       try {
         for (let idx = 0; idx < scan.data.elevations.length; idx++) {
+          if (_prebuildAborted) break;
           const mesh = buildElevationMesh(scan.data.elevations[idx], idx);
           if (mesh) {
             mesh.visible = false;
@@ -605,10 +627,16 @@ window.Radar3D = (function () {
         }
       } finally { building = false; }
 
-      // Save to cache
+      if (_prebuildAborted) {
+        Object.values(tempMeshes).forEach(m => { m.geometry.dispose(); m.material.dispose(); });
+        return;
+      }
+
+      // Save to cache (parseData stored so callers can skip re-fetch)
       evictOldestGeometry();
       geometryCache.set(scan.filename, {
         meshes: tempMeshes, rings: null,
+        parseData: scan.data,
         moment: currentMoment, heightScale, threshold,
         velocityFilter, rangeFilterLow, rangeFilterHigh,
         lastUsed: Date.now(),
@@ -621,6 +649,7 @@ window.Radar3D = (function () {
       radarLon       = prevLon;
 
       console.log('[Radar3D] Pre-built:', scan.filename);
+      if (onScanBuilt) onScanBuilt(scan.filename);
     }
   }
 
@@ -737,6 +766,10 @@ window.Radar3D = (function () {
 
   return {
     init, loadRadarData, setMapStyle, prebuildScans,
+    clearGeometryCache,
+    abortPrebuild: () => { _prebuildAborted = true; },
+    hasCachedGeometry:  filename => geometryCache.has(filename),
+    getCachedParseData: filename => geometryCache.get(filename)?.parseData ?? null,
     setMoment, setElevation, setShowAllElevations, syncVisibility,
     setPointSize, setOpacity, setHeightScale, setThreshold,
     setVelocityFilter, setRangeFilter,

@@ -4,8 +4,8 @@
   "description": "NEXRAD 3D Radar Visualization Server",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node --max-old-space-size=1536 index.js",
+    "dev": "node --max-old-space-size=1536 index.js"
   },
   "dependencies": {
     "express": "^4.18.2",

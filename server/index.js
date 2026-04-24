@@ -27,28 +27,40 @@ try {
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// In-memory parse cache — avoids re-parsing the same file on every request
-// Holds up to MAX_CACHED_SCANS parsed radar objects
-const MAX_CACHED_SCANS = 20;
+// In-memory parse cache — avoids re-parsing the same file on every request.
+// Parsed Level 2 radar objects are 200–500 MB each in V8 heap, so keep this small.
+const MAX_CACHED_SCANS = 4;
 const parseCache = new Map(); // filename -> { data, timestamp }
 
 function getCached(filename) {
   const entry = parseCache.get(filename);
   if (entry) {
-    entry.timestamp = Date.now(); // refresh LRU
+    entry.timestamp = Date.now();
     return entry.data;
   }
   return null;
 }
 
 function setCached(filename, data) {
-  // Evict oldest entry if at capacity
   if (parseCache.size >= MAX_CACHED_SCANS) {
     let oldest = null, oldestTime = Infinity;
     parseCache.forEach((v, k) => { if (v.timestamp < oldestTime) { oldest = k; oldestTime = v.timestamp; } });
     if (oldest) parseCache.delete(oldest);
   }
   parseCache.set(filename, { data, timestamp: Date.now() });
+}
+
+// Serializes parses so only one Level2Radar object is in memory at a time.
+// Without this, concurrent prewarm + manual load can double peak heap usage.
+let _parseLock = false;
+async function parseWithLock(filePath) {
+  while (_parseLock) await new Promise(r => setTimeout(r, 50));
+  _parseLock = true;
+  try {
+    return parseRadarFile(filePath);
+  } finally {
+    _parseLock = false;
+  }
 }
 
 app.use(cors());
@@ -219,7 +231,7 @@ app.post('/api/nexrad/download', async (req, res) => {
 });
 
 // Parse a cached radar file (with in-memory cache)
-app.get('/api/radar/parse', (req, res) => {
+app.get('/api/radar/parse', async (req, res) => {
   const { file } = req.query;
   if (!file) return res.status(400).json({ error: 'file required' });
   const filename = path.basename(file);
@@ -232,7 +244,7 @@ app.get('/api/radar/parse', (req, res) => {
       return res.json(cached);
     }
     console.log('Parsing: ' + filename);
-    const data = parseRadarFile(filePath);
+    const data = await parseWithLock(filePath);
     setCached(filename, data);
     res.json(data);
   } catch (err) {
@@ -246,24 +258,23 @@ app.post('/api/radar/prewarm', (req, res) => {
   const { files } = req.body;
   if (!files || !Array.isArray(files)) return res.status(400).json({ error: 'files array required' });
 
-  // Parse in background without blocking response
-  res.json({ queued: files.length });
+  // Only prewarm cache-miss files, cap at 2 to bound peak heap pressure
+  const toWarm = files
+    .map(f => path.basename(f))
+    .filter(f => !getCached(f) && fs.existsSync(path.join(DATA_DIR, f)))
+    .slice(0, 2);
+
+  res.json({ queued: toWarm.length });
 
   (async () => {
-    for (const file of files) {
-      const filename = path.basename(file);
-      if (getCached(filename)) continue; // already cached
-      const filePath = path.join(DATA_DIR, filename);
-      if (!fs.existsSync(filePath)) continue;
+    for (const filename of toWarm) {
       try {
         console.log('Pre-warming: ' + filename);
-        const data = parseRadarFile(filePath);
+        const data = await parseWithLock(path.join(DATA_DIR, filename));
         setCached(filename, data);
       } catch (e) { console.warn('Prewarm failed for ' + filename + ':', e.message); }
-      // Small yield between files to avoid blocking the event loop
-      await new Promise(r => setTimeout(r, 10));
     }
-    console.log('Pre-warm complete for ' + files.length + ' files');
+    if (toWarm.length) console.log('Pre-warm complete for ' + toWarm.length + ' files');
   })();
 });
 

@@ -160,17 +160,20 @@
       </div>
       <!-- Scan navigation — only shown when a file is loaded -->
       <div id="scan-nav" class="scan-nav" style="display:none">
-        <button class="scan-nav-btn" id="scan-prev-btn" title="Previous scan" disabled>
-          ‹
-        </button>
-        <div class="scan-nav-info">
-          <div class="scan-nav-label" id="scan-prev-label">—</div>
-          <div class="scan-nav-pos" id="scan-nav-pos">— / —</div>
-          <div class="scan-nav-label" id="scan-next-label">—</div>
+        <button class="scan-nav-btn" id="scan-prev-btn" title="Previous scan" disabled>‹</button>
+        <div class="scan-nav-center">
+          <div id="scan-timeline" class="scan-timeline"></div>
+          <div class="scan-nav-meta">
+            <span id="scan-nav-pos" class="scan-nav-pos">— / —</span>
+            <div class="scan-range-picker">
+              <span class="scan-range-label">±</span>
+              <button class="scan-range-btn" data-range="3">3</button>
+              <button class="scan-range-btn active" data-range="5">5</button>
+              <button class="scan-range-btn" data-range="10">10</button>
+            </div>
+          </div>
         </div>
-        <button class="scan-nav-btn" id="scan-next-btn" title="Next scan" disabled>
-          ›
-        </button>
+        <button class="scan-nav-btn" id="scan-next-btn" title="Next scan" disabled>›</button>
       </div>
     </div>
     <div id="status-right">
@@ -229,6 +232,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="js/colormaps.js"></script>
 <script src="js/radar3d.js"></script>
-<script src="js/app.js"></script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>

@@ -568,24 +568,72 @@ input.toggle { width: 32px; height: 16px; accent-color: var(--accent); cursor: p
 }
 .scan-nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-.scan-nav-info {
-  display: flex; align-items: center; gap: 8px;
-  background: var(--bg-surface); border: 1px solid var(--border);
-  border-radius: 4px; padding: 4px 10px;
-  min-width: 280px; justify-content: space-between;
+.scan-nav-center {
+  display: flex; flex-direction: column; gap: 3px; align-items: center;
 }
-.scan-nav-label {
-  font-family: var(--mono); font-size: 10px; color: var(--text-muted);
+
+/* Chip timeline */
+.scan-timeline {
+  display: flex; align-items: center; gap: 3px;
+  overflow-x: auto; max-width: 520px; padding: 2px 0;
+  scrollbar-width: none;
+}
+.scan-timeline::-webkit-scrollbar { display: none; }
+
+.scan-chip {
+  font-family: var(--mono); font-size: 10px; white-space: nowrap;
+  padding: 3px 7px; border-radius: 3px; cursor: pointer;
+  border: 1px solid transparent; transition: all 0.12s;
+  background: var(--bg-surface); color: var(--text-muted);
+  border-color: var(--border); flex-shrink: 0;
+}
+.scan-chip:hover { border-color: var(--border-bright); color: var(--text-secondary); }
+.scan-chip.active {
+  background: var(--accent); color: #000;
+  border-color: var(--accent); font-weight: 600;
+  box-shadow: 0 0 6px rgba(0,212,255,0.4);
+}
+/* Geometry cached — instant load (green) */
+.scan-chip.status-geometry {
+  background: rgba(0,255,136,0.12); color: #00cc6a;
+  border-color: rgba(0,255,136,0.35);
+}
+.scan-chip.status-geometry:hover { background: rgba(0,255,136,0.22); border-color: #00ff88; }
+/* Parse cached — fast load (amber) */
+.scan-chip.status-parsed {
+  background: rgba(255,170,0,0.10); color: #cc8800;
+  border-color: rgba(255,170,0,0.30);
+}
+.scan-chip.status-parsed:hover { background: rgba(255,170,0,0.20); border-color: #ffaa00; }
+/* On disk only — needs fetch (gray-blue) */
+.scan-chip.status-local {
+  background: rgba(100,160,210,0.08); color: var(--text-secondary);
+  border-color: rgba(100,160,210,0.20);
+}
+.scan-chip.status-local:hover { border-color: var(--border-bright); color: var(--text-primary); }
+
+/* Meta row below chips */
+.scan-nav-meta {
+  display: flex; align-items: center; gap: 10px;
+}
+.scan-nav-pos {
+  font-family: var(--mono); font-size: 10px; color: var(--accent);
   white-space: nowrap;
 }
-.scan-nav-label.prev { text-align: left; }
-.scan-nav-label.next { text-align: right; }
-.scan-nav-pos {
-  font-family: var(--mono); font-size: 11px; color: var(--accent);
-  white-space: nowrap; font-weight: 600;
-  border-left: 1px solid var(--border); border-right: 1px solid var(--border);
-  padding: 0 10px;
+.scan-range-picker {
+  display: flex; align-items: center; gap: 3px;
 }
+.scan-range-label {
+  font-family: var(--mono); font-size: 10px; color: var(--text-muted);
+}
+.scan-range-btn {
+  font-family: var(--mono); font-size: 10px;
+  padding: 1px 5px; border-radius: 3px; cursor: pointer;
+  background: var(--bg-surface); border: 1px solid var(--border);
+  color: var(--text-muted); transition: all 0.12s;
+}
+.scan-range-btn:hover { border-color: var(--border-bright); color: var(--text-secondary); }
+.scan-range-btn.active { background: var(--bg-elevated); border-color: var(--accent-dim); color: var(--accent); }
 
 .loading-bar {
   width: 200px; height: 4px; background: var(--bg-surface);
