@@ -32,6 +32,7 @@ window.Radar3D = (function () {
 
   let currentMoment     = 'reflectivity';
   let currentElevations = new Set([0]);
+  let selectedAngles    = new Set();   // angle values the user has explicitly chosen
   let showAllElevs      = false;
   let pointSize         = 4;
   let opacity           = 0.9;
@@ -44,6 +45,14 @@ window.Radar3D = (function () {
   let velocityFilter    = 0;    // exclude ±N m/s around zero
   let rangeFilterLow    = -999; // keep values >= this
   let rangeFilterHigh   = 9999; // keep values <= this
+
+  // Site marker overlay
+  let _siteDataSource    = null;
+  let _siteClickHandler  = null;
+  let _siteClickCallback = null;
+  let _labelOverlay      = null;
+  let _labelElements     = new Map(); // icao → { el, position: Cartesian3 }
+  let _showSiteLabels    = true;
 
   // ── Init ─────────────────────────────────────────────────────────────────
   async function init(containerId) {
@@ -105,10 +114,15 @@ window.Radar3D = (function () {
 
     // Three.js overlay canvas
     const container    = document.getElementById(containerId);
-    const cesiumCanvas = cesiumViewer.scene.canvas;
     const threeCanvas  = document.createElement('canvas');
     threeCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;';
     container.appendChild(threeCanvas);
+
+    // HTML label overlay — sits above the Three.js canvas so labels are never occluded
+    const labelOverlay = document.createElement('div');
+    labelOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;';
+    container.appendChild(labelOverlay);
+    _labelOverlay = labelOverlay;
 
     threeRenderer = new THREE.WebGLRenderer({ canvas: threeCanvas, alpha: true, antialias: false });
     threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -157,6 +171,24 @@ window.Radar3D = (function () {
     threeRenderer.resetState();
     threeRenderer.clearDepth(); // clear depth so points aren't occluded by Cesium's depth buffer
     threeRenderer.render(threeScene, threeCamera);
+
+    // Project site positions to screen and update HTML label positions.
+    // Running after Three.js render means labels are always drawn on top.
+    if (_labelElements.size > 0) {
+      const project = Cesium.SceneTransforms.worldToWindowCoordinates
+                   || Cesium.SceneTransforms.wgs84ToWindowCoordinates;
+      _labelElements.forEach(({ el, position }) => {
+        if (!_showSiteLabels) { el.style.display = 'none'; return; }
+        const pos = project(cesiumViewer.scene, position);
+        if (pos) {
+          el.style.display = '';
+          el.style.left = Math.round(pos.x) + 'px';
+          el.style.top  = Math.round(pos.y - 24) + 'px';
+        } else {
+          el.style.display = 'none'; // site is behind the globe
+        }
+      });
+    }
   }
 
   function onResize() {
@@ -252,8 +284,6 @@ window.Radar3D = (function () {
     const eN_x = -sinLatS * cosLonS, eN_y = -sinLatS * sinLonS, eN_z = cosLatS;
     // Up unit vector: (cosLat*cosLon, cosLat*sinLon, sinLat)
     const eU_x = cosLatS * cosLonS,  eU_y = cosLatS * sinLonS,  eU_z = sinLatS;
-
-    const tmp = new Float64Array(3); // reuse for each point
 
     let skipped = 0;
 
@@ -442,21 +472,22 @@ window.Radar3D = (function () {
         const lowestIdx = data.elevations.reduce((best, elev, idx) =>
           (elev.elevationAngle || 0) < (data.elevations[best].elevationAngle || 0) ? idx : best, 0);
 
-        const prevAngles = [...currentElevations]
-          .map(i => radarData && radarData.elevations[i] ? radarData.elevations[i].elevationAngle : null)
-          .filter(a => a !== null);
-
-        if (prevAngles.length > 0 && !showAllElevs) {
+        if (selectedAngles.size > 0 && !showAllElevs) {
           const newSet = new Set();
-          prevAngles.forEach(prevAngle => {
+          selectedAngles.forEach(angle => {
             let bestIdx = -1, bestDiff = Infinity;
             data.elevations.forEach((elev, idx) => {
-              const diff = Math.abs((elev.elevationAngle || 0) - prevAngle);
+              const diff = Math.abs((elev.elevationAngle || 0) - angle);
               if (diff < bestDiff) { bestDiff = diff; bestIdx = idx; }
             });
-            if (bestIdx >= 0 && bestDiff < 0.5) newSet.add(bestIdx);
+            if (bestIdx >= 0) newSet.add(bestIdx);
           });
-          if (newSet.size > 0) currentElevations = newSet;
+          currentElevations = newSet.size > 0 ? newSet : new Set([lowestIdx]);
+        } else if (!showAllElevs) {
+          currentElevations = new Set([lowestIdx]);
+        }
+        if (currentMoment && !showAllElevs) {
+          currentElevations = resolveElevsByMoment(data.elevations, currentElevations, currentMoment);
         }
 
         // Add cached meshes to scene with correct visibility
@@ -465,6 +496,13 @@ window.Radar3D = (function () {
           threeScene.add(m);
         });
         if (ringsMesh) threeScene.add(ringsMesh);
+
+        // Point size and opacity are not part of the cache key — apply current values
+        Object.values(elevationMeshes).forEach(m => {
+          m.material.size    = pointSize;
+          m.material.opacity = opacity;
+          m.material.needsUpdate = true;
+        });
 
         const availMoments = new Set();
         data.elevations.forEach(e => Object.keys(e.data).forEach(k => availMoments.add(k)));
@@ -493,28 +531,28 @@ window.Radar3D = (function () {
       return (elev.elevationAngle || 0) < (data.elevations[best].elevationAngle || 0) ? idx : best;
     }, 0);
 
-    // Elevations: match previously selected angles by value (±0.5°) in new scan
-    // so stepping between scans keeps the same physical tilt selected
-    const prevAngles = [...currentElevations]
-      .map(i => radarData && radarData.elevations[i] ? radarData.elevations[i].elevationAngle : null)
-      .filter(a => a !== null);
-
-    if (prevAngles.length > 0 && !showAllElevs) {
+    // Elevations: match user's explicitly chosen angles (selectedAngles) to the closest
+    // available index in the new scan. selectedAngles is set only by direct user clicks
+    // (via syncVisibility), so it never drifts even if a prior scan resolved incorrectly.
+    if (selectedAngles.size > 0 && !showAllElevs) {
       const newSet = new Set();
-      prevAngles.forEach(prevAngle => {
+      selectedAngles.forEach(angle => {
         let bestIdx = -1, bestDiff = Infinity;
         data.elevations.forEach((elev, idx) => {
-          const diff = Math.abs((elev.elevationAngle || 0) - prevAngle);
+          const diff = Math.abs((elev.elevationAngle || 0) - angle);
           if (diff < bestDiff) { bestDiff = diff; bestIdx = idx; }
         });
-        if (bestIdx >= 0 && bestDiff < 0.5) newSet.add(bestIdx);
+        if (bestIdx >= 0) newSet.add(bestIdx);
       });
       currentElevations = newSet.size > 0 ? newSet : new Set([lowestIdx]);
     } else if (!showAllElevs) {
-      // First load — default to lowest angle
+      // First load (user hasn't chosen yet) — default to lowest angle
       currentElevations = new Set([lowestIdx]);
     }
     // If showAllElevs is true, leave it — all tilts will show for new scan too
+    if (currentMoment && !showAllElevs) {
+      currentElevations = resolveElevsByMoment(data.elevations, currentElevations, currentMoment);
+    }
 
     building = true;
     try {
@@ -678,21 +716,41 @@ window.Radar3D = (function () {
   function flyToRadar() {
     if (!cesiumViewer || !radarLat) return;
     cesiumViewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(radarLon, radarLat - 0.8, 300000),
-      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-28), roll: 0 },
+      destination: Cesium.Cartesian3.fromDegrees(radarLon, radarLat, 350000),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 },
       duration: 2.0,
     });
   }
   function resetCamera() { flyToRadar(); }
 
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  // Returns a Set of elevation indices from `currentSet` that have `moment` data.
+  // Falls back to the lowest-angle elevation that has the moment when nothing qualifies.
+  function resolveElevsByMoment(elevations, currentSet, moment) {
+    const filtered = new Set([...currentSet].filter(i => elevations[i]?.data[moment]));
+    if (filtered.size > 0) return filtered;
+    let fallbackIdx = 0, fallbackAngle = Infinity;
+    elevations.forEach((elev, idx) => {
+      const a = elev.elevationAngle || 0;
+      if (elev.data[moment] && a < fallbackAngle) { fallbackAngle = a; fallbackIdx = idx; }
+    });
+    return new Set([fallbackIdx]);
+  }
+
   // ── Setters ───────────────────────────────────────────────────────────────
-  function setMoment(key)  {
-    currentMoment   = key;
+  function setMoment(key) {
+    currentMoment   = key;    // null = no moment selected
     velocityFilter  = 0;
     rangeFilterLow  = -999;
     rangeFilterHigh = 9999;
     threshold       = -30;
-    geometryCache.clear(); // settings changed — invalidate all cached geometry
+    // Immediately prune currentElevations to only indices that carry the new moment.
+    // This keeps the UI in sync — an elevation without the moment has no mesh.
+    if (key && radarData && !showAllElevs) {
+      currentElevations = resolveElevsByMoment(radarData.elevations, currentElevations, key);
+    }
+    geometryCache.clear();
     rebuildPointClouds();
   }
   function setHeightScale(s) { heightScale = s; geometryCache.clear(); rebuildPointClouds(); }
@@ -716,11 +774,20 @@ window.Radar3D = (function () {
     });
   }
 
-  // Sync all mesh visibility to match currentElevations set directly
+  // Sync all mesh visibility to match currentElevations set directly.
+  // Also records selectedAngles so scan switching always anchors to the user's
+  // explicit choice rather than the last scan's resolved indices.
   function syncVisibility() {
     Object.entries(elevationMeshes).forEach(([i, m]) => {
       m.visible = showAllElevs || currentElevations.has(Number(i));
     });
+    if (!showAllElevs && radarData) {
+      selectedAngles = new Set(
+        [...currentElevations]
+          .map(i => radarData.elevations[i]?.elevationAngle ?? null)
+          .filter(a => a !== null)
+      );
+    }
   }
 
   function setPointSize(size) {
@@ -728,12 +795,18 @@ window.Radar3D = (function () {
     Object.values(elevationMeshes).forEach(m => {
       m.material.size = size; m.material.needsUpdate = true;
     });
+    geometryCache.forEach(entry => {
+      Object.values(entry.meshes).forEach(m => { m.material.size = size; m.material.needsUpdate = true; });
+    });
   }
 
   function setOpacity(o) {
     opacity = o;
     Object.values(elevationMeshes).forEach(m => {
       m.material.opacity = o; m.material.needsUpdate = true;
+    });
+    geometryCache.forEach(entry => {
+      Object.values(entry.meshes).forEach(m => { m.material.opacity = o; m.material.needsUpdate = true; });
     });
   }
 
@@ -758,6 +831,70 @@ window.Radar3D = (function () {
     else if (v && !ringsMesh && radarData) buildRangeRings();
   }
 
+  // ── Site markers ──────────────────────────────────────────────────────────
+  // sites: [{ icao, lat, lon }]  activeIcao: highlighted site  onClickFn(icao): called on click
+  function setSiteMarkers(sites, activeIcao, onClickFn) {
+    if (!cesiumViewer) return;
+    _siteClickCallback = onClickFn || null;
+
+    if (!_siteDataSource) {
+      _siteDataSource = new Cesium.CustomDataSource('site-markers');
+      cesiumViewer.dataSources.add(_siteDataSource);
+
+      // Created once; all subsequent setSiteMarkers calls reuse it
+      _siteClickHandler = new Cesium.ScreenSpaceEventHandler(cesiumViewer.scene.canvas);
+      _siteClickHandler.setInputAction(function (click) {
+        const picked = cesiumViewer.scene.pick(click.position);
+        if (Cesium.defined(picked) && picked.id instanceof Cesium.Entity) {
+          const entityId = picked.id.id || '';
+          if (entityId.startsWith('site-marker-') && _siteClickCallback) {
+            _siteClickCallback(entityId.slice('site-marker-'.length));
+          }
+        }
+      }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+    }
+
+    _siteDataSource.entities.removeAll();
+    _labelElements.forEach(({ el }) => el.remove());
+    _labelElements.clear();
+    if (!sites || !sites.length) return;
+
+    sites.forEach(site => {
+      const isActive = site.icao === activeIcao;
+      const position = Cesium.Cartesian3.fromDegrees(site.lon, site.lat);
+
+      // Cesium point entity — used only for click detection
+      _siteDataSource.entities.add({
+        id:       'site-marker-' + site.icao,
+        position,
+        point: {
+          pixelSize:                isActive ? 14 : 10,
+          color:                    isActive ? Cesium.Color.WHITE
+                                             : Cesium.Color.fromCssColorString('#00d4ff'),
+          outlineColor:             isActive ? Cesium.Color.fromCssColorString('#00d4ff')
+                                             : Cesium.Color.fromCssColorString('#090c10'),
+          outlineWidth:             isActive ? 3 : 2,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      });
+
+      // HTML label — positioned every frame in syncRender, always above the point cloud
+      if (_labelOverlay) {
+        const el = document.createElement('div');
+        el.className = 'site-label' + (isActive ? ' active' : '');
+        el.textContent = site.icao;
+        _labelOverlay.appendChild(el);
+        _labelElements.set(site.icao, { el, position });
+      }
+    });
+  }
+
+  function setSiteLabelsVisible(v) {
+    _showSiteLabels = v;
+    // Hide immediately if turned off; syncRender will show again if turned on
+    if (!v) _labelElements.forEach(({ el }) => { el.style.display = 'none'; });
+  }
+
   function getTotalPoints() {
     let n = 0;
     Object.values(elevationMeshes).forEach(m => { if (m.visible) n += m.geometry.attributes.position.count; });
@@ -774,6 +911,7 @@ window.Radar3D = (function () {
     setPointSize, setOpacity, setHeightScale, setThreshold,
     setVelocityFilter, setRangeFilter,
     setShowRings, resetCamera, getTotalPoints,
+    setSiteMarkers, setSiteLabelsVisible,
     get currentMoment()     { return currentMoment; },
     get currentElevations() { return currentElevations; },
     get showAllElevs()      { return showAllElevs; },

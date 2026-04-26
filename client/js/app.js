@@ -14,6 +14,8 @@ import { init as initFilesPanel, renderLocalFiles } from './ui/files.js';
 import { init as initS3Panel, renderS3FileList } from './ui/s3.js';
 import { init as initEventsPanel, buildEventsList, buildEventFilterChips,
          getEventFileNames } from './ui/events.js';
+import { init as initCurrentPanel, onSiteModalSelect, onScanLoaded as currentOnScanLoaded,
+         getWatchedSites, switchToSite } from './ui/current.js';
 
 // ── Initialization ────────────────────────────────────────────────────────────
 
@@ -28,6 +30,7 @@ function init() {
   initFilesPanel({ onLoad: loadRadarFile, getEventFileNames });
   initS3Panel({ onLoad: loadRadarFile, onFileDownloaded: loadLocalFiles });
   initEventsPanel({ onDownloadComplete: loadLocalFiles });
+  initCurrentPanel({ onLoadScan: loadRadarFile, onLocalFiles: loadLocalFiles, onSitesChanged: refreshSiteMarkers });
 
   buildMomentButtons();
   buildSiteGrid();
@@ -41,7 +44,6 @@ function init() {
     panel.classList.remove('collapsed');
     try {
       updateMomentInfoPanel('reflectivity');
-      console.log('[Panel] Init render OK');
     } catch(e) {
       console.error('[Panel] Init render failed:', e);
     }
@@ -78,13 +80,10 @@ async function loadRadarFile(filename, siteIcao, { prewarm = true } = {}) {
     }
 
     let data = getCachedParsed(filename);
-    if (data) {
-      console.log('[App] Parse cache hit:', filename);
-    } else {
+    if (!data) {
       // Geometry cache stores parse data alongside meshes — use it to skip server fetch
       data = window.Radar3D.getCachedParseData(filename);
       if (data) {
-        console.log('[App] Parse data recovered from geometry cache:', filename);
         setCachedParsed(filename, data);
       } else {
         const res = await fetch(`${API}/radar/parse?file=${encodeURIComponent(filename)}`);
@@ -102,7 +101,6 @@ async function loadRadarFile(filename, siteIcao, { prewarm = true } = {}) {
       ? data.header.icao
       : earlyIcao;
     const coords = getSiteCoords(icao);
-    console.log('[App] Site ICAO:', icao, '| coords:', coords);
     state.activeSite = { icao, ...coords };
 
     state.availableMoments = new Set();
@@ -123,6 +121,9 @@ async function loadRadarFile(filename, siteIcao, { prewarm = true } = {}) {
 
     $('empty-state').classList.add('hidden');
     switchTab('display');
+
+    currentOnScanLoaded(filename);
+    refreshSiteMarkers();
 
     const activeMoment = state.availableMoments.has(window.Radar3D.currentMoment)
       ? window.Radar3D.currentMoment
@@ -377,7 +378,12 @@ function buildSiteGrid(filter = '') {
     card.className = 'site-card';
     card.innerHTML = `<div class="site-icao">${s.icao}</div><div class="site-state">${s.state} — ${s.name}</div>`;
     card.addEventListener('click', () => {
-      $('site-input').value = s.icao;
+      // If the Current panel is waiting for a site selection, fill that input
+      if (window._currentModalTarget) {
+        onSiteModalSelect(s.icao);
+      } else {
+        $('site-input').value = s.icao;
+      }
       $('site-modal').style.display = 'none';
     });
     grid.appendChild(card);
@@ -396,16 +402,33 @@ function setupEventListeners() {
   $('site-input').addEventListener('keydown', e => { if (e.key === 'Enter') listS3Files(); });
 
   $('site-lookup-btn').addEventListener('click', () => {
+    window._currentModalTarget = false;
     $('site-modal').style.display = 'flex'; $('site-search').focus();
   });
   $('site-search').addEventListener('input', e => buildSiteGrid(e.target.value));
-  document.querySelector('.modal-close').addEventListener('click', () => { $('site-modal').style.display = 'none'; });
-  document.querySelector('.modal-backdrop').addEventListener('click', () => { $('site-modal').style.display = 'none'; });
+  document.querySelector('.modal-close').addEventListener('click', () => {
+    window._currentModalTarget = false;
+    $('site-modal').style.display = 'none';
+  });
+  document.querySelector('.modal-backdrop').addEventListener('click', () => {
+    window._currentModalTarget = false;
+    $('site-modal').style.display = 'none';
+  });
 
   $('moment-buttons').addEventListener('click', e => {
     const btn = e.target.closest('.moment-btn');
     if (!btn || btn.disabled) return;
-    const key  = btn.dataset.moment;
+    const key = btn.dataset.moment;
+
+    if (key === window.Radar3D.currentMoment) {
+      // Clicking the active moment deselects it — clears the point cloud
+      window.Radar3D.setMoment(null);
+      updateMomentButtons();
+      buildElevationList();
+      updatePointCount();
+      return;
+    }
+
     const info = MOMENT_INFO[key];
     if (info) {
       if (info.filterType === 'min')               window.Radar3D.setThreshold(info.filterDefault);
@@ -415,6 +438,7 @@ function setupEventListeners() {
     window.Radar3D.setMoment(key);
     updateMomentButtons();
     updateColorbar(key);
+    buildElevationList();
     updatePointCount();
   });
 
@@ -449,7 +473,12 @@ function setupEventListeners() {
     updatePointCount();
   });
   $('show-rings').addEventListener('change', e => window.Radar3D.setShowRings(e.target.checked));
-  $('animate-tilts').addEventListener('change', e => window.Radar3D.setShowAllElevations(e.target.checked));
+  $('show-site-labels').addEventListener('change', e => window.Radar3D.setSiteLabelsVisible(e.target.checked));
+  $('animate-tilts').addEventListener('change', e => {
+    window.Radar3D.setShowAllElevations(e.target.checked);
+    buildElevationList();
+    updatePointCount();
+  });
 
   $('reset-camera-btn').addEventListener('click', () => window.Radar3D.resetCamera());
   $('scan-prev-btn').addEventListener('click', () => navigateScan(-1));
@@ -492,6 +521,35 @@ function setupEventListeners() {
       if (btns[idx] && !btns[idx].disabled) btns[idx].click();
     }
   });
+}
+
+// ── Site markers ─────────────────────────────────────────────────────────────
+
+function refreshSiteMarkers() {
+  const watched = getWatchedSites();
+  if (watched.length > 0) {
+    // Current mode is active — show all watched sites, highlight the displayed one
+    window.Radar3D.setSiteMarkers(watched, state.activeSite?.icao ?? null, _handleSiteMarkerClick);
+  } else if (state.activeSite) {
+    // No Current mode — just mark the single active site
+    window.Radar3D.setSiteMarkers(
+      [{ icao: state.activeSite.icao, lat: state.activeSite.lat, lon: state.activeSite.lon }],
+      state.activeSite.icao,
+      _handleSiteMarkerClick
+    );
+  } else {
+    window.Radar3D.setSiteMarkers([], null, null);
+  }
+}
+
+function _handleSiteMarkerClick(icao) {
+  const watched = getWatchedSites();
+  if (watched.some(s => s.icao === icao)) {
+    switchToSite(icao);
+  } else {
+    // Only marker is the active site — clicking it re-centers the camera
+    window.Radar3D.resetCamera();
+  }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

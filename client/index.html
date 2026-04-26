@@ -26,8 +26,14 @@
 
   <div class="tab-bar">
     <button class="tab active" data-tab="files">FILES</button>
+    <button class="tab" data-tab="current">CURRENT</button>
     <button class="tab" data-tab="display">DISPLAY</button>
     <button class="tab" data-tab="fetch">FETCH</button>
+  </div>
+
+  <!-- CURRENT TAB -->
+  <div class="tab-content" id="tab-current">
+    <div id="current-panel"></div>
   </div>
 
   <!-- FETCH TAB -->
@@ -140,6 +146,10 @@
       <input type="checkbox" id="show-rings" checked class="toggle">
     </div>
     <div class="toggle-row">
+      <label>SHOW SITE LABELS</label>
+      <input type="checkbox" id="show-site-labels" checked class="toggle">
+    </div>
+    <div class="toggle-row">
       <label>SHOW ALL TILTS</label>
       <input type="checkbox" id="animate-tilts" class="toggle">
     </div>
@@ -205,9 +215,10 @@
     <div class="empty-card">
       <div class="empty-icon">◈</div>
       <div class="empty-title">NEXRAD 3D RADAR VIEWER</div>
-      <div class="empty-sub">Select a radar site and date from the FETCH tab,<br>then download and load a scan to begin.</div>
+      <div class="empty-sub">Select a radar site and date from the FETCH tab,<br>then download and load a scan to begin.<br><br>Use the <strong>CURRENT</strong> tab to watch live weather.</div>
       <div class="empty-tips">
         <div class="tip">↖ Use the FILES tab to load cached scans</div>
+        <div class="tip">↖ Use the CURRENT tab to watch live weather</div>
         <div class="tip">↖ Use the FETCH tab to download from archive</div>
         <div class="tip">↖ Use the DISPLAY tab to control rendering</div>
       </div>

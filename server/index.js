@@ -69,7 +69,7 @@ app.use(express.static(path.join(__dirname, '../client')));
 
 const storage = multer.diskStorage({
   destination: DATA_DIR,
-  filename: (req, file, cb) => cb(null, file.originalname),
+  filename: (_req, file, cb) => cb(null, file.originalname),
 });
 const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
@@ -139,13 +139,11 @@ function parseRadarFile(filePath) {
   return result;
 }
 
-// Serve Cesium token to client (safe — token never in source code)
-app.get('/api/config', (req, res) => {
+app.get('/api/config', (_req, res) => {
   res.json({ cesiumToken: config.cesiumToken || '' });
 });
 
-// List cached local files
-app.get('/api/local-files', (req, res) => {
+app.get('/api/local-files', (_req, res) => {
   try {
     const files = fs.readdirSync(DATA_DIR)
       .filter(f => !f.startsWith('.'))
@@ -292,8 +290,7 @@ app.delete('/api/local-files/:filename', (req, res) => {
   res.json({ success: true });
 });
 
-// Serve client app
-app.get('*', (req, res) => {
+app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, '../client/index.html'));
 });
 

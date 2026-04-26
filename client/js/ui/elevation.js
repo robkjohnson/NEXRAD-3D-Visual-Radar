@@ -1,10 +1,21 @@
 import { $, updatePointCount } from '../utils.js';
 import { state } from '../state.js';
 
+let _showAllAngles    = false;
+let _lastFilterMoment = null;
+
 export function buildElevationList() {
   const container = $('elevation-list');
   container.innerHTML = '';
   if (!state.radarData) return;
+
+  const activeMoment = window.Radar3D.currentMoment;
+
+  // Auto-reset the "show all" filter whenever the active moment changes
+  if (activeMoment !== _lastFilterMoment) {
+    _showAllAngles    = false;
+    _lastFilterMoment = activeMoment;
+  }
 
   const allBtn = document.createElement('div');
   allBtn.className = 'elev-all-toggle' + (window.Radar3D.showAllElevs ? ' active' : '');
@@ -12,17 +23,17 @@ export function buildElevationList() {
   allBtn.addEventListener('click', () => {
     const newVal = !window.Radar3D.showAllElevs;
     window.Radar3D.setShowAllElevations(newVal);
-    allBtn.classList.toggle('active', newVal);
-    document.querySelectorAll('.elev-item, .elev-sub-item').forEach(el => {
-      el.classList.toggle('active', newVal);
-    });
-    document.querySelectorAll('.elev-submenu').forEach(sm => {
-      sm.style.display = newVal ? 'flex' : 'none';
-    });
-    document.querySelectorAll('.elev-cuts-chevron').forEach(ch => {
-      ch.textContent = newVal ? '⌄' : '›';
-      ch.classList.toggle('open', newVal);
-    });
+    if (!newVal) {
+      // Rebuild from currentElevations so each item shows the correct active state.
+      // Force-clearing all items would desync the UI from actual mesh visibility.
+      buildElevationList();
+      updatePointCount();
+      return;
+    }
+    allBtn.classList.add('active');
+    document.querySelectorAll('.elev-item, .elev-sub-item').forEach(el => el.classList.add('active'));
+    document.querySelectorAll('.elev-submenu').forEach(sm => { sm.style.display = 'flex'; });
+    document.querySelectorAll('.elev-cuts-chevron').forEach(ch => { ch.textContent = '⌄'; ch.classList.add('open'); });
     updatePointCount();
   });
   container.appendChild(allBtn);
@@ -42,6 +53,30 @@ export function buildElevationList() {
   const momentOrder = ['reflectivity','velocity','spectrum','zdr','phi','rho'];
   const momentShort = { reflectivity:'REF', velocity:'VEL', spectrum:'SW', zdr:'ZDR', phi:'PHI', rho:'RHO' };
 
+  // ── Moment filter chip ──────────────────────────────────────────────────
+  if (activeMoment) {
+    const totalAngles       = sortedGroups.length;
+    const anglesWithMoment  = sortedGroups.filter(([, entries]) =>
+      entries.some(({ elev }) => elev.data[activeMoment])
+    ).length;
+
+    if (anglesWithMoment < totalAngles) {
+      const chip = document.createElement('div');
+      chip.className = 'elev-filter-chip';
+      const shortName = momentShort[activeMoment] || activeMoment.toUpperCase();
+      if (_showAllAngles) {
+        chip.innerHTML = `All ${totalAngles} angles &nbsp;<span class="elev-filter-link">Filter to ${shortName}</span>`;
+      } else {
+        chip.innerHTML = `${anglesWithMoment} of ${totalAngles} angles have ${shortName} &nbsp;<span class="elev-filter-link">Show all</span>`;
+      }
+      chip.addEventListener('click', () => {
+        _showAllAngles = !_showAllAngles;
+        buildElevationList();
+      });
+      container.appendChild(chip);
+    }
+  }
+
   function cutLabel(entryMoments, allEntriesAtAngle) {
     const keys = Object.keys(entryMoments);
     if (allEntriesAtAngle.length === 1) return null;
@@ -52,8 +87,6 @@ export function buildElevationList() {
     const hasPhi     = keys.includes('phi');
     const hasRho     = keys.includes('rho');
     const hasDualPol = hasZdr || hasPhi || hasRho;
-
-    console.log('[CutLabel] keys:', keys, '| hasRef:', hasRef, '| hasVel:', hasVel, '| hasDualPol:', hasDualPol);
 
     if (hasRef && !hasVel && !hasDualPol) return 'Long Range REF';
     if (hasRef && !hasVel && hasDualPol)  return 'REF + Dual-Pol';
@@ -89,9 +122,18 @@ export function buildElevationList() {
   }
 
   sortedGroups.forEach(([angleKey, entries]) => {
-    if (entries.length === 1) {
-      // ── Single cut — simple row ──────────────────────────────────────────
-      const { elev, idx } = entries[0];
+    // When a moment is active and "show all" is off, only display elevations
+    // that carry that moment's data. This avoids showing angles the user
+    // cannot actually render (they have no mesh for the current moment).
+    const visibleEntries = (!activeMoment || _showAllAngles)
+      ? entries
+      : entries.filter(({ elev }) => elev.data[activeMoment]);
+
+    if (visibleEntries.length === 0) return;
+
+    if (visibleEntries.length === 1) {
+      // ── Single visible cut — simple row ─────────────────────────────────
+      const { elev, idx } = visibleEntries[0];
       const keys = Object.keys(elev.data);
       const tags = momentOrder.filter(k => keys.includes(k))
         .map(k => `<span class="moment-tag">${momentShort[k]}</span>`).join('');
@@ -106,14 +148,14 @@ export function buildElevationList() {
       container.appendChild(item);
 
     } else {
-      // ── Multiple cuts — clickable angle row + collapsible sub-menu ───────
-      const firstIdx  = entries[0].idx;
-      const firstKeys = Object.keys(entries[0].elev.data);
+      // ── Multiple visible cuts — clickable angle row + collapsible sub-menu
+      const firstIdx  = visibleEntries[0].idx;
+      const firstKeys = Object.keys(visibleEntries[0].elev.data);
       const firstTags = momentOrder.filter(k => firstKeys.includes(k))
         .map(k => `<span class="moment-tag">${momentShort[k]}</span>`).join('');
 
-      const anyActive  = entries.some(({ idx }) => window.Radar3D.currentElevations.has(idx)) || window.Radar3D.showAllElevs;
-      const allIndices = entries.map(e => e.idx);
+      const anyActive  = visibleEntries.some(({ idx }) => window.Radar3D.currentElevations.has(idx)) || window.Radar3D.showAllElevs;
+      const allIndices = visibleEntries.map(e => e.idx);
 
       const wrapper = document.createElement('div');
       wrapper.className = 'elev-group-wrapper';
@@ -130,10 +172,11 @@ export function buildElevationList() {
       subMenu.className = 'elev-submenu';
       subMenu.style.display = 'none';
 
-      entries.forEach(({ elev, idx }, cutI) => {
+      visibleEntries.forEach(({ elev, idx }, cutI) => {
         const keys  = Object.keys(elev.data);
         const tags  = momentOrder.filter(k => keys.includes(k))
           .map(k => `<span class="moment-tag">${momentShort[k]}</span>`).join('');
+        // Pass original entries for label context so multi-cut naming is accurate
         const label = cutLabel(elev.data, entries) || `Cut ${cutI + 1}`;
         const isActive = window.Radar3D.currentElevations.has(idx) || window.Radar3D.showAllElevs;
 

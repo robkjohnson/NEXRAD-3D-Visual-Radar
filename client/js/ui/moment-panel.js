@@ -48,14 +48,7 @@ export function updateMomentInfoPanel(momentKey) {
     return;
   }
 
-  console.log('[Panel] Updating for:', momentKey);
   const panelEl = $('moment-info-panel');
-  const titleEl = $('moment-info-title');
-  const descEl  = $('moment-info-desc');
-  console.log('[Panel] Elements found:', !!panelEl, !!titleEl, !!descEl);
-  console.log('[Panel] Panel classes:', panelEl?.className);
-  console.log('[Panel] Tab active:', $('tab-display')?.classList.contains('active'));
-
   if (panelEl) panelEl.classList.remove('collapsed');
 
   $('moment-info-title').textContent = info.name;
